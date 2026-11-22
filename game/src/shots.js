@@ -1,25 +1,27 @@
-// Midnight Vault — staged scenes for the screenshots.
-// ?shot=title | play | alert | win, with ?seed= for the dust.
-// Each scene is built from the same deterministic level data, so the
-// same URL always renders the same picture. The play shot is the one
-// that matters: one frame must show the room, the thief, guards with
-// cones, a camera, a loot target and the alarm meter.
+// Midnight Vault v2 — staged scenes for the four screenshots.
+// ?shot=title | play | alert | win, with ?seed= for the dust. Each scene is
+// built from the same deterministic level data, so the same URL always
+// renders the same picture. The play shot is the one that matters: one
+// frame must show the room, the thief, guards with cones, a camera, a loot
+// target and the alarm meter.
+import { TILE, COLS, ROWS, TILES } from './config.js';
+import { SENTRY_STATE } from './guard.js';
 
-import { GUARD_STATE } from './guard.js';
-import { TILE } from './config.js';
-
-// Find a shadow tile near the middle of the room for the thief to crouch on.
-function findShadowTile(world) {
-  for (let y = 1; y < 17; y++) {
-    for (let x = 1; x < 31; x++) {
-      if (world.tileAt((x + 0.5) * TILE, (y + 0.5) * TILE) === 3) return { x, y };
+// The shadow tile nearest the middle of the room: the thief's crouch spot.
+function shadowSpot(world) {
+  let best = null;
+  let bestD = Infinity;
+  for (let row = 1; row < ROWS - 1; row++) {
+    for (let col = 1; col < COLS - 1; col++) {
+      if (world.grid[row * COLS + col] !== TILES.SHADOW) continue;
+      const d = (col - COLS / 2) ** 2 + (row - ROWS / 2) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = { x: (col + 0.5) * TILE, y: (row + 0.5) * TILE };
+      }
     }
   }
-  return { x: 12, y: 8 };
-}
-
-function aimGuardAt(guard, player) {
-  guard.angle = Math.atan2(player.y - guard.y, player.x - guard.x);
+  return best ?? { x: 12.5 * TILE, y: 8.5 * TILE };
 }
 
 export function stageShot(game, shot) {
@@ -30,26 +32,28 @@ export function stageShot(game, shot) {
   }
   if (shot === 'play') {
     // Mid-heist: one vault diamond already pocketed, the thief crouched
-    // in shadow at a cone's edge, a guard suspicious, a camera sweeping
-    // across the room, the alarm meter part-filled.
+    // in shadow near the middle, a guard grown suspicious and sweeping
+    // its cone toward them, a camera sweeping, the alarm part-filled.
     game.status = 'playing';
     const vault = world.loot.find((l) => l.kind === 'vault');
     if (vault) {
       world.takeLoot(vault);
       game.score += 500;
     }
-    const shadow = findShadowTile(world);
-    player.x = (shadow.x + 0.5) * TILE;
-    player.y = (shadow.y + 0.5) * TILE;
+    const spot = shadowSpot(world);
+    player.x = spot.x;
+    player.y = spot.y;
     player.sneaking = true;
     player.facing = Math.PI / 4;
     const guard = guards[0];
-    guard.suspicion = 55;
-    guard.state = GUARD_STATE.INVESTIGATE;
+    guard.x = (13.5) * TILE;
+    guard.y = (5.5) * TILE;
+    guard.suspicion = 58;
+    guard.state = SENTRY_STATE.INVESTIGATE;
     guard.lastSeen = { x: player.x + 120, y: player.y - 40 };
-    aimGuardAt(guard, player);
-    game.alarm = 34;
-    game.time = 47;
+    guard.angle = Math.atan2(player.y - guard.y, player.x - guard.x);
+    game.alarm = 31;
+    game.time = 52;
     return;
   }
   if (shot === 'alert') {
@@ -60,17 +64,17 @@ export function stageShot(game, shot) {
     player.x = guard.x + 90;
     player.y = guard.y + 26;
     player.facing = Math.PI;
-    guard.state = GUARD_STATE.CHASE;
+    guard.state = SENTRY_STATE.CHASE;
     guard.suspicion = 100;
     guard.lastSeen = { x: player.x, y: player.y };
-    aimGuardAt(guard, player);
+    guard.angle = Math.atan2(player.y - guard.y, player.x - guard.x);
     if (cameras[0]) {
       cameras[0].angle = Math.atan2(player.y - cameras[0].y, player.x - cameras[0].x);
       cameras[0].seeing = true;
     }
-    game.alarm = 82;
+    game.alarm = 84;
     game.spottedCount = 1;
-    game.time = 96;
+    game.time = 97;
     return;
   }
   if (shot === 'win') {
@@ -86,8 +90,8 @@ export function stageShot(game, shot) {
     player.x = world.exit.x - TILE * 1.5;
     player.y = world.exit.y + TILE * 0.5;
     player.facing = 0;
-    game.alarm = 12;
-    game.time = 148;
+    game.alarm = 11;
+    game.time = 151;
     return;
   }
   game.status = 'title';

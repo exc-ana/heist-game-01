@@ -1,199 +1,189 @@
-// Midnight Vault — the room itself: tiles, collision, line of sight.
-// A level's data becomes a 32x18 tile grid. Tile kinds:
-//   0 floor, 1 wall (solid, blocks sight), 2 crate (solid, blocks sight),
-//   3 shadow floor (walkable; the thief is hard to see standing on it).
+// Midnight Vault v2 — the vault itself: tile grid, loot, collision and sight.
+// The map text becomes a grid of tile kinds plus the loot, the exit and the
+// thief's start. Everything that moves asks this class what is solid, what
+// can be seen across a room, and whether a route is even possible.
+import { TILE, COLS, ROWS, TILES } from './config.js';
 
-import { COLS, ROWS, TILE } from './config.js';
-
-export const T_FLOOR = 0;
-export const T_WALL = 1;
-export const T_CRATE = 2;
-export const T_SHADOW = 3;
+const MARKS = {
+  '#': TILES.WALL,
+  '.': TILES.FLOOR,
+  ',': TILES.CARPET,
+  ':': TILES.SHADOW,
+  '*': TILES.LAMP,
+  X: TILES.CRATE,
+};
+const LOOT_MARKS = { G: 'gold', V: 'vault', A: 'painting', S: 'safe' };
 
 export class World {
   constructor(level) {
-    this.level = level;
+    this.title = level.title;
     this.grid = new Uint8Array(COLS * ROWS);
-    // Border walls.
-    for (let x = 0; x < COLS; x++) {
-      this.set(x, 0, T_WALL);
-      this.set(x, ROWS - 1, T_WALL);
-    }
-    for (let y = 0; y < ROWS; y++) {
-      this.set(0, y, T_WALL);
-      this.set(COLS - 1, y, T_WALL);
-    }
-    for (const w of level.walls) {
-      for (let y = w.y; y < w.y + w.h; y++) {
-        for (let x = w.x; x < w.x + w.w; x++) this.set(x, y, T_WALL);
+    this.loot = [];
+    this.lamps = [];
+    this.exit = { x: 0, y: 0 };
+    this.start = { x: 0, y: 0 };
+    for (let row = 0; row < ROWS; row++) {
+      const line = level.map[row] ?? '';
+      for (let col = 0; col < COLS; col++) {
+        const ch = line[col] ?? '#';
+        let kind = MARKS[ch];
+        if (kind === undefined) {
+          if (LOOT_MARKS[ch]) {
+            kind = TILES.FLOOR;
+            this.loot.push({
+              kind: LOOT_MARKS[ch],
+              x: (col + 0.5) * TILE,
+              y: (row + 0.5) * TILE,
+              taken: false,
+              crack: 0,
+            });
+          } else if (ch === 'P') {
+            kind = TILES.FLOOR;
+            this.start = { x: (col + 0.5) * TILE, y: (row + 0.5) * TILE };
+          } else if (ch === 'E') {
+            kind = TILES.FLOOR;
+            this.exit = { x: (col + 0.5) * TILE, y: (row + 0.5) * TILE };
+          } else {
+            kind = TILES.WALL;
+          }
+        }
+        this.grid[row * COLS + col] = kind;
+        if (kind === TILES.LAMP) {
+          this.lamps.push({ x: (col + 0.5) * TILE, y: (row + 0.5) * TILE });
+        }
       }
     }
-    for (const [x, y] of level.crates) this.set(x, y, T_CRATE);
-    for (const [x, y] of level.shadow) {
-      if (this.get(x, y) === T_FLOOR) this.set(x, y, T_SHADOW);
-    }
-    this.loot = level.loot.map((l) => ({
-      x: (l.x + 0.5) * TILE,
-      y: (l.y + 0.5) * TILE,
-      tileX: l.x,
-      tileY: l.y,
-      kind: l.kind,
-      taken: false,
-    }));
-    this.exit = { x: (level.exit.x + 0.5) * TILE, y: (level.exit.y + 0.5) * TILE };
-    this.playerStart = {
-      x: (level.playerStart.x + 0.5) * TILE,
-      y: (level.playerStart.y + 0.5) * TILE,
-    };
     this.vaultTotal = this.loot.filter((l) => l.kind === 'vault').length;
-  }
-
-  set(x, y, v) {
-    if (x >= 0 && x < COLS && y >= 0 && y < ROWS) this.grid[y * COLS + x] = v;
-  }
-
-  get(x, y) {
-    if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return T_WALL;
-    return this.grid[y * COLS + x];
+    this.goldTaken = 0;
+    this.def = level;
   }
 
   tileAt(px, py) {
-    return this.get(Math.floor(px / TILE), Math.floor(py / TILE));
+    const col = Math.floor(px / TILE);
+    const row = Math.floor(py / TILE);
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return TILES.WALL;
+    return this.grid[row * COLS + col];
   }
 
-  isSolid(px, py) {
-    const t = this.tileAt(px, py);
-    return t === T_WALL || t === T_CRATE;
+  solidAt(col, row) {
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+    const kind = this.grid[row * COLS + col];
+    return kind === TILES.WALL || kind === TILES.CRATE;
   }
 
-  blocksSight(px, py) {
-    return this.isSolid(px, py);
+  solidPx(px, py) {
+    return this.solidAt(Math.floor(px / TILE), Math.floor(py / TILE));
   }
 
-  isShadow(px, py) {
-    return this.tileAt(px, py) === T_SHADOW;
-  }
-
-  /** Circle-vs-tiles collision: slide along walls, never tunnel through. */
-  moveCircle(x, y, dx, dy, radius) {
-    let nx = x + dx;
-    if (!this.isSolid(nx + Math.sign(dx) * radius, y - radius + 1) &&
-        !this.isSolid(nx + Math.sign(dx) * radius, y + radius - 1)) {
-      x = nx;
+  // True when a circle of radius r centred at (x, y) touches a solid tile.
+  blocked(x, y, r) {
+    const c0 = Math.floor((x - r) / TILE);
+    const c1 = Math.floor((x + r) / TILE);
+    const r0 = Math.floor((y - r) / TILE);
+    const r1 = Math.floor((y + r) / TILE);
+    for (let row = r0; row <= r1; row++) {
+      for (let col = c0; col <= c1; col++) {
+        if (!this.solidAt(col, row)) continue;
+        const nearX = Math.max(col * TILE, Math.min(x, (col + 1) * TILE));
+        const nearY = Math.max(row * TILE, Math.min(y, (row + 1) * TILE));
+        if ((x - nearX) ** 2 + (y - nearY) ** 2 < r * r) return true;
+      }
     }
-    let ny = y + dy;
-    if (!this.isSolid(x - radius + 1, ny + Math.sign(dy) * radius) &&
-        !this.isSolid(x + radius - 1, ny + Math.sign(dy) * radius)) {
-      y = ny;
-    }
-    return { x, y };
+    return false;
   }
 
-  /** True when the segment between two points crosses no solid tile. */
-  hasLineOfSight(x0, y0, x1, y1) {
-    const dx = x1 - x0;
-    const dy = y1 - y0;
-    const dist = Math.hypot(dx, dy);
-    const steps = Math.max(1, Math.ceil(dist / (TILE / 3)));
+  // True when nothing solid stands between the two points.
+  lineClear(x0, y0, x1, y1) {
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.max(1, Math.ceil(dist / 6));
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
-      if (this.blocksSight(x0 + dx * t, y0 + dy * t)) return false;
+      if (this.solidPx(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return false;
     }
     return true;
   }
 
-  /** Distance to the first solid tile along a ray, capped at maxDist. */
-  rayDistance(x, y, angle, maxDist) {
-    const step = 6;
-    const dx = Math.cos(angle) * step;
-    const dy = Math.sin(angle) * step;
-    let cx = x;
-    let cy = y;
-    for (let d = step; d <= maxDist; d += step) {
-      cx += dx;
-      cy += dy;
-      if (this.blocksSight(cx, cy)) return d;
-    }
-    return maxDist;
+  onCarpet(x, y) {
+    return this.tileAt(x, y) === TILES.CARPET;
   }
 
-  lootAt(px, py) {
+  inShadow(x, y) {
+    return this.tileAt(x, y) === TILES.SHADOW;
+  }
+
+  // Nearest pocketable loot within reach. Safes are never pocketed on
+  // touch — they open only by cracking, which the game handles itself.
+  lootAt(x, y) {
     for (const l of this.loot) {
-      if (!l.taken && Math.hypot(l.x - px, l.y - py) < TILE * 0.7) return l;
+      if (l.taken || l.kind === 'safe') continue;
+      if (Math.hypot(l.x - x, l.y - y) < 26) return l;
     }
     return null;
   }
 
-  takeLoot(l) {
-    l.taken = true;
-  }
-
-  get vaultTaken() {
-    return this.loot.filter((l) => l.kind === 'vault' && l.taken).length;
+  takeLoot(item) {
+    if (item.taken) return;
+    item.taken = true;
+    if (item.kind === 'gold') this.goldTaken += 1;
   }
 
   get allVaultTaken() {
-    return this.vaultTaken >= this.vaultTotal;
+    return this.loot.filter((l) => l.kind === 'vault').every((l) => l.taken);
   }
 
-  get goldTaken() {
-    return this.loot.filter((l) => l.kind === 'gold' && l.taken).length;
+  atExit(x, y) {
+    return Math.hypot(this.exit.x - x, this.exit.y - y) < 30;
   }
 
-  atExit(px, py) {
-    return Math.hypot(this.exit.x - px, this.exit.y - py) < TILE * 0.8;
-  }
-
-  /** Flood-fill from the player start; returns every tile that cannot be reached. */
+  // Every loot, the exit, the start, each sentry spawn and waypoint and
+  // each lens must be reachable on foot from the start, and every patrol
+  // leg must be a straight clear line.
   validate() {
     const problems = [];
-    const seen = new Uint8Array(COLS * ROWS);
-    const stack = [[this.level.playerStart.x, this.level.playerStart.y]];
-    seen[this.level.playerStart.y * COLS + this.level.playerStart.x] = 1;
-    while (stack.length) {
-      const [cx, cy] = stack.pop();
+    const seen = new Set();
+    const queue = [[Math.floor(this.start.x / TILE), Math.floor(this.start.y / TILE)]];
+    seen.add(queue[0].join(','));
+    while (queue.length) {
+      const [cx, cy] = queue.shift();
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const nx = cx + dx;
         const ny = cy + dy;
-        if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
-        if (seen[ny * COLS + nx]) continue;
-        const t = this.get(nx, ny);
-        if (t === T_WALL || t === T_CRATE) continue;
-        seen[ny * COLS + nx] = 1;
-        stack.push([nx, ny]);
-      }
-    }
-    const mustReach = [];
-    for (const l of this.level.loot) mustReach.push(['loot ' + l.kind, l.x, l.y]);
-    mustReach.push(['exit', this.level.exit.x, this.level.exit.y]);
-    mustReach.push(['player start', this.level.playerStart.x, this.level.playerStart.y]);
-    for (const g of this.level.guards) {
-      mustReach.push(['guard spawn', g.x, g.y]);
-      for (const [wx, wy] of g.waypoints) mustReach.push(['guard waypoint', wx, wy]);
-    }
-    for (const c of this.level.cameras) mustReach.push(['camera', c.x, c.y]);
-    for (const [label, tx, ty] of mustReach) {
-      if (!seen[ty * COLS + tx]) problems.push(`${label} at (${tx},${ty}) unreachable`);
-    }
-    // Every guard patrol segment must be a clear straight line.
-    for (const g of this.level.guards) {
-      for (let i = 0; i + 1 < g.waypoints.length; i++) {
-        const [ax, ay] = g.waypoints[i];
-        const [bx, by] = g.waypoints[i + 1];
-        const x0 = (ax + 0.5) * TILE;
-        const y0 = (ay + 0.5) * TILE;
-        const x1 = (bx + 0.5) * TILE;
-        const y1 = (by + 0.5) * TILE;
-        if (!this.hasLineOfSight(x0, y0, x1, y1)) {
-          problems.push(`guard patrol segment (${ax},${ay})->(${bx},${by}) blocked`);
+        const key = `${nx},${ny}`;
+        if (!seen.has(key) && !this.solidAt(nx, ny)) {
+          seen.add(key);
+          queue.push([nx, ny]);
         }
       }
     }
-    // Rows must be consistent: no loot/exit on a solid tile.
-    for (const l of this.level.loot) {
-      const t = this.get(l.x, l.y);
-      if (t === T_WALL || t === T_CRATE) problems.push(`loot at (${l.x},${l.y}) on solid tile`);
+    const reachable = (px, py) => seen.has(`${Math.floor(px / TILE)},${Math.floor(py / TILE)}`);
+    if (!reachable(this.start.x, this.start.y)) problems.push('start is walled in');
+    if (!reachable(this.exit.x, this.exit.y)) problems.push('exit is unreachable');
+    for (const l of this.loot) {
+      if (!reachable(l.x, l.y)) problems.push(`${l.kind} loot is unreachable`);
     }
+    for (const s of this.def.guards) {
+      const sx = (s.tx + 0.5) * TILE;
+      const sy = (s.ty + 0.5) * TILE;
+      if (!reachable(sx, sy)) problems.push(`${s.kind} sentry spawns unreachable`);
+      const points = s.path.map(([tx, ty]) => ({ x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE }));
+      for (const p of points) {
+        if (!reachable(p.x, p.y)) problems.push(`${s.kind} waypoint is unreachable`);
+      }
+      for (let i = 0; i < points.length; i++) {
+        const a = points[i];
+        const b = points[(i + 1) % points.length];
+        if (!this.lineClear(a.x, a.y, b.x, b.y)) {
+          problems.push(`${s.kind} patrol leg is blocked`);
+        }
+      }
+    }
+    for (const lens of this.def.cameras) {
+      const lx = (lens.tx + 0.5) * TILE;
+      const ly = (lens.ty + 0.5) * TILE;
+      if (!reachable(lx, ly)) problems.push('lens is unreachable');
+    }
+    if (this.vaultTotal < 1) problems.push('no vault loot');
+    if (this.loot.length < 1) problems.push('no loot at all');
     return problems;
   }
 }

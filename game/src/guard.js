@@ -1,25 +1,18 @@
-// Midnight Vault — the guards: waypoint patrols, vision cones, suspicion.
-// States: patrol → suspicious (investigate the last seen spot) →
-// spotted (chase the thief) → search (lost the thief, look around) →
-// return (walk back to the patrol route). Suspicion 0–100; at 100 the
-// guard spots the thief and gives chase. A guard that touches the thief
-// catches them. Detection is faster up close, slower when the thief
-// sneaks or hides in shadow, faster when the thief runs.
+// Midnight Vault v2 — the sentries: patrol, warden and rover.
+// A sentry watches a cone. Seen, the thief's suspicion climbs; at full it
+// gives chase, at a whiff it walks over to look, and when the trail goes
+// cold it searches, then drifts back to its route. A warden never leaves
+// its post — it sweeps one long cone and trusts it. A rover is fast and
+// nervous, with a short cone and a slow fuse.
+import { TILE, SENTRY_KINDS, SENTRY } from './config.js';
 
-import { GUARD, TILE } from './config.js';
-import { clamp } from './random.js';
-
-export const GUARD_STATE = {
+export const SENTRY_STATE = {
   PATROL: 'patrol',
   INVESTIGATE: 'investigate',
   CHASE: 'chase',
   SEARCH: 'search',
   RETURN: 'return',
 };
-
-function angleTo(x0, y0, x1, y1) {
-  return Math.atan2(y1 - y0, x1 - x0);
-}
 
 function angleDiff(a, b) {
   let d = a - b;
@@ -28,157 +21,130 @@ function angleDiff(a, b) {
   return d;
 }
 
-function turnToward(current, target, maxStep) {
-  const d = angleDiff(target, current);
-  if (Math.abs(d) <= maxStep) return target;
-  return current + Math.sign(d) * maxStep;
-}
-
-export class Guard {
+export class Sentry {
   constructor(def) {
-    this.x = (def.x + 0.5) * TILE;
-    this.y = (def.y + 0.5) * TILE;
-    this.waypoints = def.waypoints.map(([wx, wy]) => ({
-      x: (wx + 0.5) * TILE,
-      y: (wy + 0.5) * TILE,
-    }));
-    this.speed = def.speed || 1;
-    this.wpIndex = 1 % this.waypoints.length;
-    this.angle = angleTo(this.x, this.y, this.waypoints[this.wpIndex].x, this.waypoints[this.wpIndex].y);
-    this.state = GUARD_STATE.PATROL;
+    const profile = SENTRY_KINDS[def.kind];
+    this.kind = def.kind;
+    this.profile = profile;
+    this.x = (def.tx + 0.5) * TILE;
+    this.y = (def.ty + 0.5) * TILE;
+    this.home = { x: this.x, y: this.y };
+    this.route = def.path.map(([tx, ty]) => ({ x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE }));
+    this.leg = 0;
+    this.face = def.face ?? 0;
+    this.angle = this.face;
+    this.state = SENTRY_STATE.PATROL;
     this.suspicion = 0;
     this.lastSeen = null;
     this.stateTime = 0;
-    this.searchSpots = [];
+    this.sweepT = 0;
+    this.walkPhase = 0;
+    this.seenFactor = 1;
     this.caughtPlayer = false;
-    this.wasSeen = false; // true while the thief is inside this cone this frame
   }
 
-  /** Cone test: range, angle, line of sight. Returns 0..1 (0 = not seen). */
-  sees(world, px, py, sneaking, inShadow, running) {
-    const dx = px - this.x;
-    const dy = py - this.y;
+  // True when the thief stands inside this sentry's cone with a clear
+  // line of sight. A thief crouched in shadow only shows up close, and
+  // even then suspicion grows at a quarter pace.
+  canSee(world, thief) {
+    const dx = thief.x - this.x;
+    const dy = thief.y - this.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > GUARD.coneRange) return 0;
-    const toPlayer = Math.atan2(dy, dx);
-    if (Math.abs(angleDiff(toPlayer, this.angle)) > GUARD.coneHalf) return 0;
-    if (!world.hasLineOfSight(this.x, this.y, px, py)) return 0;
-    let gain = dist < 110 ? GUARD.gainClose : dist < 190 ? GUARD.gainMid : GUARD.gainFar;
-    if (sneaking) gain *= GUARD.gainSneak;
-    if (inShadow) gain *= GUARD.gainShadow;
-    if (running) gain *= GUARD.gainRun;
-    return gain;
-  }
-
-  update(dt, world, player) {
-    this.stateTime += dt;
-    this.wasSeen = false;
-    const gain = this.sees(
-      world, player.x, player.y, player.sneaking, player.inShadow, player.running,
-    );
-    if (gain > 0) {
-      this.wasSeen = true;
-      this.suspicion = clamp(this.suspicion + gain * dt, 0, 100);
-      this.lastSeen = { x: player.x, y: player.y };
+    if (dist > this.profile.view) return false;
+    if (Math.abs(angleDiff(Math.atan2(dy, dx), this.angle)) > this.profile.half) return false;
+    if (!world.lineClear(this.x, this.y, thief.x, thief.y)) return false;
+    if (world.inShadow(thief.x, thief.y)) {
+      if (dist > 90) return false;
+      this.seenFactor = 0.25;
     } else {
-      this.suspicion = clamp(this.suspicion - GUARD.decay * dt, 0, 100);
+      this.seenFactor = 1;
     }
-
-    if (this.suspicion >= GUARD.spottedAt && this.state !== GUARD_STATE.CHASE) {
-      this.state = GUARD_STATE.CHASE;
-      this.stateTime = 0;
-    } else if (this.suspicion >= GUARD.suspiciousAt && this.state === GUARD_STATE.PATROL) {
-      this.state = GUARD_STATE.INVESTIGATE;
-      this.stateTime = 0;
-    }
-
-    switch (this.state) {
-      case GUARD_STATE.PATROL:
-        this.patrol(dt, world, GUARD.patrol * this.speed);
-        break;
-      case GUARD_STATE.INVESTIGATE: {
-        const target = this.lastSeen;
-        if (target && this.moveToward(dt, world, target.x, target.y, GUARD.investigate * this.speed)) {
-          this.state = GUARD_STATE.SEARCH;
-          this.stateTime = 0;
-          this.searchSpots = [target];
-        } else if (this.stateTime > GUARD.investigateTime) {
-          this.state = GUARD_STATE.SEARCH;
-          this.stateTime = 0;
-        }
-        break;
-      }
-      case GUARD_STATE.CHASE: {
-        const target = this.lastSeen || { x: player.x, y: player.y };
-        if (this.wasSeen) {
-          this.moveToward(dt, world, player.x, player.y, GUARD.chase * this.speed);
-        } else if (this.moveToward(dt, world, target.x, target.y, GUARD.chase * this.speed)) {
-          this.state = GUARD_STATE.SEARCH;
-          this.stateTime = 0;
-        }
-        if (this.stateTime > GUARD.searchTime + 3) {
-          this.state = GUARD_STATE.RETURN;
-          this.stateTime = 0;
-        }
-        break;
-      }
-      case GUARD_STATE.SEARCH:
-        // Look around the last seen spot, then give up.
-        this.angle += Math.sin(this.stateTime * 2.2) * dt * 1.4;
-        if (this.stateTime > GUARD.searchTime || this.suspicion < 5) {
-          this.state = GUARD_STATE.RETURN;
-          this.stateTime = 0;
-        }
-        break;
-      case GUARD_STATE.RETURN: {
-        const wp = this.nearestWaypoint();
-        if (this.moveToward(dt, world, wp.x, wp.y, GUARD.patrol * this.speed)) {
-          this.wpIndex = this.waypoints.indexOf(wp);
-          this.state = GUARD_STATE.PATROL;
-          this.stateTime = 0;
-        }
-        break;
-      }
-    }
-
-    // Caught: a guard that reaches the thief ends the heist.
-    if (Math.hypot(player.x - this.x, player.y - this.y) < GUARD.radius + 13) {
-      this.caughtPlayer = true;
-    }
+    return true;
   }
 
-  nearestWaypoint() {
-    let best = this.waypoints[0];
-    let bestD = Infinity;
-    for (const wp of this.waypoints) {
-      const d = Math.hypot(wp.x - this.x, wp.y - this.y);
-      if (d < bestD) {
-        bestD = d;
-        best = wp;
-      }
-    }
-    return best;
-  }
-
-  patrol(dt, world, speed) {
-    const target = this.waypoints[this.wpIndex];
-    if (this.moveToward(dt, world, target.x, target.y, speed)) {
-      this.wpIndex = (this.wpIndex + 1) % this.waypoints.length;
-    }
-  }
-
-  /** Walk toward a point; returns true when arrived. Turns to face the walk. */
   moveToward(dt, world, tx, ty, speed) {
     const dx = tx - this.x;
     const dy = ty - this.y;
     const dist = Math.hypot(dx, dy);
     if (dist < 4) return true;
-    const want = Math.atan2(dy, dx);
-    this.angle = turnToward(this.angle, want, dt * 6);
     const step = Math.min(dist, speed * dt);
-    const pos = world.moveCircle(this.x, this.y, Math.cos(this.angle) * step, Math.sin(this.angle) * step, GUARD.radius);
-    this.x = pos.x;
-    this.y = pos.y;
-    return dist - step < 4;
+    const nx = this.x + (dx / dist) * step;
+    const ny = this.y + (dy / dist) * step;
+    if (!world.blocked(nx, this.y, SENTRY.radius)) this.x = nx;
+    if (!world.blocked(this.x, ny, SENTRY.radius)) this.y = ny;
+    this.angle = Math.atan2(dy, dx);
+    this.walkPhase += step * 0.09;
+    return Math.hypot(tx - this.x, ty - this.y) < 6;
+  }
+
+  update(dt, world, thief) {
+    const seen = this.canSee(world, thief);
+    if (seen) {
+      const dist = Math.hypot(thief.x - this.x, thief.y - this.y);
+      const closeness = 1 - (dist / this.profile.view) * 0.6;
+      this.suspicion += 42 * closeness * this.profile.gain * this.seenFactor * dt;
+      this.lastSeen = { x: thief.x, y: thief.y };
+      if (this.suspicion >= SENTRY.max) {
+        this.suspicion = SENTRY.max;
+        if (this.state !== SENTRY_STATE.CHASE) {
+          this.state = SENTRY_STATE.CHASE;
+          this.stateTime = 0;
+        }
+      }
+    } else {
+      this.suspicion = Math.max(0, this.suspicion - SENTRY.decay * dt);
+    }
+    this.stateTime += dt;
+
+    if (this.state === SENTRY_STATE.PATROL) {
+      if (this.kind === 'warden') {
+        this.sweepT += dt;
+        this.angle = this.face + Math.sin(this.sweepT * 0.5) * SENTRY.sweep;
+      } else if (this.route.length > 1) {
+        const target = this.route[(this.leg + 1) % this.route.length];
+        if (this.moveToward(dt, world, target.x, target.y, this.profile.speed)) {
+          this.leg = (this.leg + 1) % this.route.length;
+        }
+      }
+      if (this.suspicion >= 60 && this.lastSeen) {
+        this.state = SENTRY_STATE.INVESTIGATE;
+        this.stateTime = 0;
+      }
+    } else if (this.state === SENTRY_STATE.INVESTIGATE) {
+      if (this.lastSeen) {
+        const speed = this.profile.speed * 1.15;
+        if (this.moveToward(dt, world, this.lastSeen.x, this.lastSeen.y, speed)) {
+          this.state = SENTRY_STATE.SEARCH;
+          this.stateTime = 0;
+        }
+      }
+      if (this.suspicion < 25) {
+        this.state = SENTRY_STATE.RETURN;
+        this.stateTime = 0;
+      }
+    } else if (this.state === SENTRY_STATE.CHASE) {
+      this.moveToward(dt, world, thief.x, thief.y, this.profile.chase);
+      if (!seen && this.stateTime > SENTRY.chaseTime) {
+        this.state = SENTRY_STATE.SEARCH;
+        this.stateTime = 0;
+      }
+      if (this.suspicion < 30) {
+        this.state = SENTRY_STATE.RETURN;
+        this.stateTime = 0;
+      }
+    } else if (this.state === SENTRY_STATE.SEARCH) {
+      this.angle += dt * 0.9;
+      if (this.stateTime > SENTRY.searchTime) {
+        this.state = SENTRY_STATE.RETURN;
+        this.stateTime = 0;
+      }
+    } else if (this.state === SENTRY_STATE.RETURN) {
+      const spot = this.route[this.leg] ?? this.home;
+      if (this.moveToward(dt, world, spot.x, spot.y, this.profile.speed)) {
+        this.state = SENTRY_STATE.PATROL;
+        this.suspicion = 0;
+        this.stateTime = 0;
+      }
+    }
   }
 }

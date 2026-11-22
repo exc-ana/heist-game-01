@@ -1,110 +1,59 @@
-// Midnight Vault — every tuning number and colour in one place.
-// The playfield is a fixed 1280x720 logical area; the renderer scales
-// it to the window, so no rule below depends on the screen size.
-
-export const FIELD = { width: 1280, height: 720 };
+// Midnight Vault v2 — every number the game balances on, in one place.
+// Sizes, speeds, sight cones, loot values and tool limits live here so a
+// tweak lands once and the whole game follows it.
 export const TILE = 40;
 export const COLS = 32;
-export const ROWS = 18;
+export const ROWS = 20;
+export const VIEW_W = 1280;
+export const VIEW_H = 800;
+export const HUD_H = 46;
 
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
+// Tile kinds stored in the world grid.
+export const TILES = { WALL: 0, FLOOR: 1, CARPET: 2, SHADOW: 3, LAMP: 4, CRATE: 5 };
 
-export const PLAYER = {
+export const THIEF = {
   radius: 13,
-  walk: 175,
-  sneak: 95,
-  run: 265,
+  walk: 165,
+  run: 238,
+  sneak: 92,
   coins: 3,
-  emp: 1,
+  emps: 1,
+  hacks: 2,
 };
 
-export const GUARD = {
-  radius: 14,
-  patrol: 105,
-  investigate: 150,
-  chase: 215,
-  coneRange: 270,
-  coneHalf: 0.61, // ~35 degrees
-  rays: 26,
-  suspiciousAt: 35,
-  spottedAt: 100,
-  // Suspicion gained per second while the thief is inside the cone.
-  gainClose: 95,
-  gainMid: 55,
-  gainFar: 30,
-  gainSneak: 0.45,
-  gainShadow: 0.35,
-  gainRun: 1.6,
-  decay: 22,
-  investigateTime: 4,
-  searchTime: 5,
+// One profile per sentry kind: how fast it walks and chases, how far and
+// how wide it sees, and how fast it grows suspicious.
+export const SENTRY_KINDS = {
+  patrol: { speed: 78, chase: 128, view: 232, half: 0.62, gain: 1.0, roam: 1.0 },
+  warden: { speed: 0, chase: 55, view: 305, half: 0.5, gain: 1.45, roam: 0 },
+  rover: { speed: 118, chase: 168, view: 178, half: 0.72, gain: 0.85, roam: 1.5 },
 };
 
-export const CAMERA = {
-  range: 300,
-  coneHalf: 0.44, // ~25 degrees
-  rays: 22,
-  sweep: 0.9, // radians either side of the base angle
-  sweepSpeed: 0.55, // radians per second
-  alarmGain: 34, // alarm points per second while the thief is seen
-  offlineSeconds: 6, // how long one EMP keeps every camera dark
-};
-
-export const ALARM = {
+export const SENTRY = {
+  radius: 13,
+  catch: 27,
+  sweep: 1.15,
   max: 100,
-  decay: 9, // points per second while unseen
-  lockdownAt: 100, // alarm full: every guard hunts the thief
-  lockdownSeconds: 6,
+  decay: 26,
+  chaseTime: 2.2,
+  searchTime: 3.0,
+  investigateTime: 4.0,
 };
 
-export const LOOT = {
-  gold: 100,
-  vault: 500,
+export const LENS = {
+  view: 252,
+  half: 0.55,
+  sweep: 0.85,
+  sweepSpeed: 0.55,
+  alarmGain: 13,
+  empOff: 6,
+  hackOff: 8,
+  hackRange: 95,
 };
 
-export const COIN = {
-  radius: 5,
-  hearRadius: 240,
-  throwSpeed: 420,
-};
+export const METER = { max: 100, decay: 9, lockdown: 6 };
 
-export const PALETTE = {
-  backdrop: '#0a0c12',
-  floorA: '#171a24',
-  floorB: '#14171f',
-  floorLine: '#1e2230',
-  wall: '#2b3040',
-  wallTop: '#3d4459',
-  wallTrim: '#c9a227',
-  crate: '#5a4632',
-  crateTop: '#7a6248',
-  shadow: '#0e1424',
-  shadowEdge: '#1b2742',
-  gold: '#f2c94c',
-  vault: '#7ee7ff',
-  exit: '#39d98a',
-  exitGlow: '#1d7a4c',
-  player: '#e8e4d8',
-  playerCloak: '#232838',
-  guard: '#e5534b',
-  guardDark: '#8c2f2a',
-  cone: 'rgba(229, 83, 75, 0.20)',
-  coneEdge: 'rgba(229, 83, 75, 0.45)',
-  coneSuspicious: 'rgba(242, 201, 76, 0.28)',
-  cam: '#ff9f43',
-  camCone: 'rgba(255, 159, 67, 0.18)',
-  camConeEdge: 'rgba(255, 159, 67, 0.5)',
-  alarm: '#e5534b',
-  alarmWarn: '#f2c94c',
-  panel: '#12151f',
-  panelEdge: '#2a3040',
-  text: '#eef1f5',
-  muted: '#8b93a3',
-  danger: '#ff5a4e',
-};
+export const PRIZE = { gold: 100, painting: 150, safe: 250, vault: 500 };
 
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'midnight-vault.best';
+export const SAFE_CRACK = 2.0;
+export const COIN_HEAR = 150;
