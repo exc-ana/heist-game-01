@@ -7,3 +7,7 @@ WORKING-NOTES.md
 tools/
 serve.ts
 shots.json
+transcripts-v2/
+WORKING-NOTES-V2.md
+transcripts-v2-rebuild/
+WORKING-NOTES-V2-REBUILD.md
